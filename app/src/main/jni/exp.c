@@ -388,7 +388,6 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
         if (batch_end > total_blocks) batch_end = total_blocks;
         size_t batch_size = batch_end - batch_start;
 
-        /* Phase 1: write all ESP packets in this batch into the pipe */
         for (size_t i = batch_start; i < batch_end; i++) {
             off_t off = (off_t)(foff + i * 16);
             uint8_t old_content[16] = {0};
@@ -433,12 +432,15 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
                 printf("write #%zu at 0x%lx failed after 3 attempts\n", i, (long)off);
                 rc = -1; goto batch_done;
             }
-        }
 
-        /* Phase 2: flush the batch to the socket in one splice */
-        if (flush_pipe_to_socket(pfd[0], sk_send, batch_size * 40) < 0) {
-            rc = -1;
-            goto batch_done;
+            /* Flush this single 40-byte ESP packet to the socket immediately.
+             * The IPsec ESP transform needs pacing between datagrams —
+             * batching 64 splices back-to-back overflows its send buffer
+             * and the transform silently drops packets. */
+            if (flush_pipe_to_socket(pfd[0], sk_send, 40) < 0) {
+                rc = -1;
+                goto batch_done;
+            }
         }
 
         if (batch_start % (BATCH * 4) == 0)
