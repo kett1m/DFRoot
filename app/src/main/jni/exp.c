@@ -288,10 +288,17 @@ static int do_one_write_cbc_pipe(int pipe_wr, int file_fd, off_t offset,
 
 /* Splice accumulated ESP packets from pipe to UDP socket in one call. */
 static int flush_pipe_to_socket(int pipe_rd, int sk_send, size_t total_bytes) {
-    ssize_t s = splice(pipe_rd, NULL, sk_send, NULL, (ssize_t)total_bytes, 0);
-    if (s != (ssize_t)total_bytes) {
-        printf("splice pipe->udp: %zd expected %zu\n", s, total_bytes);
-        return -1;
+    /* Each 40-byte ESP packet must be its own UDP datagram.
+     * Splicing the whole batch in one call creates a single oversized
+     * datagram that the kernel ESP transform silently drops. */
+    size_t remaining = total_bytes;
+    while (remaining >= 40) {
+        ssize_t s = splice(pipe_rd, NULL, sk_send, NULL, 40, 0);
+        if (s != 40) {
+            printf("splice pipe->udp: %zd expected 40 (remaining %zu)\n", s, remaining);
+            return -1;
+        }
+        remaining -= 40;
     }
     return 0;
 }
