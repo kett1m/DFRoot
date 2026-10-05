@@ -11,32 +11,61 @@
 #define BLKROSET   0x125d
 #define KSUD       "/data/user_de/0/df.root/ksud"
 #define PREFS_PATH "/data/user_de/0/df.root/shared_prefs/dfroot.xml"
-static int read_prefs(char *su_manager, size_t su_manager_size, int *soft_reboot)
-{
-    int fd = open(PREFS_PATH, O_RDONLY);
-    if (fd < 0) return -1;
+#define SU_MGR_FILE "/data/user_de/0/df.root/su_manager"
+#define SOFT_REBOOT_FILE "/data/user_de/0/df.root/soft_reboot"
 
-    char buf[4096];
-    int n = read(fd, buf, sizeof(buf) - 1);
+/* Read a plain-text file into buf, stripping trailing newline. */
+static int read_text_file(const char *path, char *buf, size_t buf_size)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    int n = read(fd, buf, buf_size - 1);
     close(fd);
     if (n <= 0) return -1;
     buf[n] = '\0';
+    if (n > 0 && buf[n - 1] == '\n') buf[--n] = '\0';
+    return 0;
+}
 
-    char *p = strstr(buf, "name=\"su_manager\">");
-    if (!p) return -1;
-    p += strlen("name=\"su_manager\">");
-    char *end = strchr(p, '<');
-    if (!end) return -1;
-    size_t len = end - p;
-    if (len == 0 || len >= su_manager_size) return -1;
-    memcpy(su_manager, p, len);
-    su_manager[len] = '\0';
+static int read_prefs(char *su_manager, size_t su_manager_size, int *soft_reboot)
+{
+    char xml_buf[4096] = {0};
+    int have_xml = 0;
 
-    char *bp = strstr(buf, "name=\"soft_reboot\"");
-    if (bp) {
-        char *bend = strchr(bp, '>');
-        char *v    = strstr(bp, "value=\"true\"");
-        *soft_reboot = v && bend && v < bend ? 1 : 0;
+    /* Primary: plain-text file (written by ExploitRunner) */
+    if (read_text_file(SU_MGR_FILE, su_manager, su_manager_size) != 0 || !su_manager[0]) {
+        /* Fallback: legacy XML prefs */
+        int fd = open(PREFS_PATH, O_RDONLY);
+        if (fd < 0) return -1;
+        int n = read(fd, xml_buf, sizeof(xml_buf) - 1);
+        close(fd);
+        if (n <= 0) return -1;
+        xml_buf[n] = '\0';
+        have_xml = 1;
+
+        char *p = strstr(xml_buf, "name=\"su_manager\">");
+        if (!p) return -1;
+        p += strlen("name=\"su_manager\">");
+        char *end = strchr(p, '<');
+        if (!end) return -1;
+        size_t len = end - p;
+        if (len == 0 || len >= su_manager_size) return -1;
+        memcpy(su_manager, p, len);
+        su_manager[len] = '\0';
+    }
+
+    /* Soft reboot: plain-text file, fallback to XML */
+    if (access(SOFT_REBOOT_FILE, F_OK) == 0) {
+        *soft_reboot = 1;
+    } else if (have_xml) {
+        char *bp = strstr(xml_buf, "name=\"soft_reboot\"");
+        if (bp) {
+            char *bend = strchr(bp, '>');
+            char *v    = strstr(bp, "value=\"true\"");
+            *soft_reboot = v && bend && v < bend ? 1 : 0;
+        } else {
+            *soft_reboot = 0;
+        }
     } else {
         *soft_reboot = 0;
     }
