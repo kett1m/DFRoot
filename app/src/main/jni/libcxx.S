@@ -110,8 +110,6 @@ libcxx_start:
     mov     x2, selinux_ctx_end - selinux_ctx
     mov     x8, #SYS_write
     svc     0
-    cmp     w0, #0              // verify SELinux context write succeeded
-    b.lt    myexit              // negative = error, bail
 
     // execve("/vendor/bin/insmod", [exe_path, ko_target, NULL], NULL)
     adr     x1, exe_path
