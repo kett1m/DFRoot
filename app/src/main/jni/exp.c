@@ -614,8 +614,10 @@ static int exploit(void) {
         };
         int seen[sizeof(markers)/sizeof(markers[0])] = {0};
 
-        for (int elapsed = 0; elapsed < 7000; elapsed += 10) {
+        for (int elapsed = 0; elapsed < 20000; elapsed += 10) {
             usleep(10000);
+            if (elapsed > 0 && elapsed % 5000 == 0)
+                printf("  waiting... %ds\n", elapsed / 1000);
             for (size_t j = 0; j < sizeof(markers)/sizeof(markers[0]); j++) {
                 if (!seen[j] && has_marker(markers[j].path)) {
                     seen[j] = 1;
