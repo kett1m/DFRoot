@@ -37,6 +37,7 @@ int find_hook_target(const char *libcxx, const char *symname,
 
     uint64_t executable_off = 0;
     uint64_t executable_vaddr = 0;
+    uint64_t executable_filesz = 0;
     for (int i = 0; i < hdr.e_phnum; i++) {
         Elf64_Phdr phdr;
         if (read(fd, (char *)&phdr, sizeof(phdr)) < 0) {
@@ -47,6 +48,7 @@ int find_hook_target(const char *libcxx, const char *symname,
             *payload_target = phdr.p_offset + phdr.p_filesz;
             executable_off   = phdr.p_offset;
             executable_vaddr = phdr.p_vaddr;
+            executable_filesz = phdr.p_filesz;
             break;
         }
     }
@@ -122,6 +124,15 @@ int find_hook_target(const char *libcxx, const char *symname,
 
     if (*hook_target == 0) {
         printf("symbol %s not found in %s\n", symname, libcxx);
+        close(fd); return 1;
+    }
+
+    if (*hook_target < executable_off ||
+        *hook_target >= executable_off + executable_filesz) {
+        printf("hook target 0x%lx outside executable segment [0x%lx, 0x%lx)\n",
+               (unsigned long)*hook_target,
+               (unsigned long)executable_off,
+               (unsigned long)(executable_off + executable_filesz));
         close(fd); return 1;
     }
 
