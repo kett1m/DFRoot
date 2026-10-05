@@ -230,8 +230,19 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
         uint8_t iv[16];
         compute_iv(old_content, desired, iv);
 
-        if (do_one_write_cbc(pfd[0], pfd[1], sk_send, file_fd, off, iv, use_helper) < 0) {
-            printf("write #%zu at 0x%lx failed\n", i, (long)off);
+        int write_ok = 0;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (do_one_write_cbc(pfd[0], pfd[1], sk_send, file_fd, off, iv, use_helper) == 0) {
+                write_ok = 1;
+                break;
+            }
+            if (attempt < 2) {
+                printf("write #%zu at 0x%lx retry %d...\n", i, (long)off, attempt + 1);
+                usleep(10000);
+            }
+        }
+        if (!write_ok) {
+            printf("write #%zu at 0x%lx failed after 3 attempts\n", i, (long)off);
             rc = -1; break;
         }
         if (i % 32 == 0)
