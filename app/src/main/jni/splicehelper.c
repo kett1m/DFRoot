@@ -7,8 +7,11 @@
 // argv[0] = program name
 // argv[1] = file offset (decimal string)
 // argv[2] = file path
-// argv[3] = optional "r" — read mode: write 16 bytes of file content to fd 0 (OUT_FD)
-//           if absent — splice mode: splice 16 bytes of file page into fd 1 (PIPE_FD)
+// argv[3] = mode:
+//   "r" — one-shot read: write 16 bytes of file content to fd 0, exit
+//   "d" — daemon: loop reading (cmd, off8) from fd 0, respond on fd 2 (read)
+//         or fd 1 (splice), until EOF on fd 0
+//   absent — one-shot splice: splice 16 bytes of file page into fd 1, exit
 
 #define OUT_FD  0
 #define PIPE_FD 1
@@ -84,7 +87,52 @@ void start_c(void *argblock) {
         mysyscall1((unsigned long)(w == 16 ? 0 : 2), __NR_exit_group);
     }
 
-    /* Splice mode: splice 16-byte page into PIPE_FD */
+    if (mode && streq(mode, "d")) {
+        /* Daemon mode: loop reading (cmd_byte, off8_le) from OUT_FD (stdin).
+         * cmd=0: lseek+read 16 bytes, write to OUT_FD
+         * cmd=1: splice 16 bytes into PIPE_FD
+         * Exit on EOF (read returns 0) or error. */
+        for (;;) {
+            unsigned char hdr[9];
+            long n = mysyscall3(OUT_FD, (unsigned long)hdr, 9, __NR_read);
+            if (n != 9) break;  /* EOF or short read */
+            unsigned char cmd = hdr[0];
+            off64_t doff = (off64_t)(
+                (unsigned)hdr[1]        |
+                (unsigned)hdr[2] << 8   |
+                (unsigned)hdr[3] << 16  |
+                (unsigned)hdr[4] << 24  |
+                (unsigned long)hdr[5] << 32 |
+                (unsigned long)hdr[6] << 40 |
+                (unsigned long)hdr[7] << 48 |
+                (unsigned long)hdr[8] << 56);
+
+            mysyscall3((unsigned long)file_fd, (unsigned long)doff, SEEK_SET, __NR_lseek);
+
+            if (cmd == 1) {
+                /* Splice 16 bytes into PIPE_FD, then ACK on fd 2 */
+                long sr = mysyscall6(
+                    (unsigned long)file_fd,
+                    (unsigned long)&doff,
+                    PIPE_FD,
+                    (unsigned long)NULL,
+                    16,
+                    SPLICE_F_MOVE,
+                    __NR_splice);
+                unsigned char ack = (sr == 16) ? 1 : 0;
+                mysyscall3(2, (unsigned long)&ack, 1, __NR_write);
+            } else {
+                /* Read 16 bytes, write to stderr (fd 2 = data pipe) */
+                unsigned char buf[16];
+                long rn = mysyscall3((unsigned long)file_fd, (unsigned long)buf, 16, __NR_read);
+                if (rn != 16) break;
+                mysyscall3(2, (unsigned long)buf, 16, __NR_write);
+            }
+        }
+        mysyscall1(0, __NR_exit_group);
+    }
+
+    /* One-shot splice mode: splice 16-byte page into PIPE_FD */
     long ret = mysyscall6(
         (unsigned long)file_fd,
         (unsigned long)&off,
