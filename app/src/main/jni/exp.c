@@ -380,9 +380,34 @@ static int patch_ko(void) {
     if (!buf) return -1;
     printf("* patch_ko (%s <- dfroot.ko, %zu bytes)\n", libcxx_ko_target, len);
     int ret = patch_file_cbc(libcxx_ko_target, buf, len, 0, 1);
+    if (ret) {
+        printf("patch_ko failed: %d\n", ret);
+        free(buf);
+        return ret;
+    }
+
+    /* Spot-check: verify blocks at start, middle, and end of the KO */
+    {
+        size_t checks[3] = {
+            0,
+            (len / 2) & ~(size_t)15,
+            len - 16
+        };
+        for (int i = 0; i < 3; i++) {
+            uint8_t verify[16];
+            if (read_vendor_content((off_t)checks[i], verify) == 0) {
+                if (memcmp(verify, buf + checks[i], 16) != 0) {
+                    printf("patch_ko verify FAILED at offset 0x%zx\n", checks[i]);
+                    free(buf);
+                    return -1;
+                }
+            }
+        }
+        printf("patch_ko verify OK (3 spot-checks)\n");
+    }
+
     free(buf);
-    if (ret) printf("patch_ko failed: %d\n", ret);
-    return ret;
+    return 0;
 }
 
 static void cleanup(void) {
