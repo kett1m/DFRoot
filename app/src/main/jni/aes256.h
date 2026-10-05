@@ -129,7 +129,7 @@ static void aes256_ecb_decrypt_rk(const uint32_t rk[60], const uint8_t ct[16], u
 }
 
 /* Legacy: expands key on every call (use aes256_ecb_decrypt_rk for performance) */
-static void aes256_ecb_decrypt(const uint8_t key[32], const uint8_t ct[16], uint8_t pt[16]) {
+static __attribute__((unused)) void aes256_ecb_decrypt(const uint8_t key[32], const uint8_t ct[16], uint8_t pt[16]) {
     uint32_t rk[60];
     _aes256_expand(key, rk);
     aes256_ecb_decrypt_rk(rk, ct, pt);

@@ -110,7 +110,7 @@ libcxx_start:
     mov     x8, #SYS_openat
     svc     0
     tbnz    w0, #31, 1f          // skip if open failed (non-fatal)
-    mov     x1, ko_target
+    adr     x1, ko_target
     mov     x2, #64              // max path length
     mov     x8, #SYS_write
     svc     0
