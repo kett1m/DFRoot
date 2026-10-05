@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <sys/select.h>
 #include <dirent.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -66,14 +67,14 @@ static int helper_spawn(struct HelperCtx *h, const char *path, int esp_pipe_wr) 
         return -1;
     }
 
-    int pid = (int)syscall(__NR_clone, SIGCHLD | CLONE_VM, 0, 0, 0, 0);
+    int pid = (int)syscall(__NR_clone, SIGCHLD | CLONE_VFORK | CLONE_VM, 0, 0, 0, 0);
     if (pid < 0) {
         close(cmd_pipe[0]); close(cmd_pipe[1]);
         close(data_pipe[0]); close(data_pipe[1]);
         return -1;
     }
     if (pid == 0) {
-        /* Child: set up fds for daemon mode
+        /* Child (vfork: parent suspended until exec/_exit):
          * stdin  = cmd_pipe[0]   (commands from parent)
          * stdout = esp_pipe_wr   (splice output → ESP pipe)
          * stderr = data_pipe[1]  (read responses → parent's data_fd)
@@ -115,12 +116,23 @@ static int helper_send_cmd(struct HelperCtx *h, int cmd, off64_t offset) {
     return 0;
 }
 
+/* Read with timeout to avoid blocking forever if the helper dies. */
+static ssize_t helper_recv(struct HelperCtx *h, void *buf, size_t len, int timeout_ms) {
+    fd_set rfds;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    FD_ZERO(&rfds);
+    FD_SET(h->data_fd, &rfds);
+    int sel = select(h->data_fd + 1, &rfds, NULL, NULL, &tv);
+    if (sel <= 0) return -1;  /* timeout or error */
+    return read(h->data_fd, buf, len);
+}
+
 /* Read 16 bytes of file content from the helper (read mode). */
 static int helper_read(struct HelperCtx *h, off64_t offset, uint8_t buf[16]) {
     if (helper_send_cmd(h, 0, offset) < 0) return -1;
     ssize_t n = 0;
     while (n < 16) {
-        ssize_t r = read(h->data_fd, buf + n, 16 - n);
+        ssize_t r = helper_recv(h, buf + n, 16 - n, 5000);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
         if (r == 0) return -1;  /* helper died */
         n += r;
@@ -136,7 +148,7 @@ static int helper_splice(struct HelperCtx *h, off64_t offset) {
     unsigned char ack;
     ssize_t n = 0;
     while (n < 1) {
-        ssize_t r = read(h->data_fd, &ack, 1);
+        ssize_t r = helper_recv(h, &ack, 1, 5000);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
         if (r == 0) return -1;  /* helper died */
         n += r;
