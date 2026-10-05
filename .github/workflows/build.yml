@@ -82,6 +82,26 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk_version="27.0.12077973"
+
+          for attempt in 1 2 3; do
+            if sdkmanager --install "ndk;${ndk_version}"; then
+              exit 0
+            fi
+
+            rm -rf "${ANDROID_SDK_ROOT}/ndk/${ndk_version}"
+            sleep $((attempt * 10))
+          done
+
+          echo "::error::Failed to install NDK ${ndk_version} after three attempts."
+          exit 1
+
       - uses: gradle/actions/setup-gradle@v6
 
       - name: Build DFRoot APK
