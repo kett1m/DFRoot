@@ -294,11 +294,16 @@ static int flush_pipe_to_socket(int pipe_rd, int sk_send, size_t total_bytes) {
     size_t remaining = total_bytes;
     while (remaining >= 40) {
         ssize_t s = splice(pipe_rd, NULL, sk_send, NULL, 40, 0);
-        if (s != 40) {
+        if (s == 40) {
+            remaining -= 40;
+        } else if (s < 0 && errno == EAGAIN) {
+            /* Send buffer full — IPsec transform is still processing.
+             * Wait briefly and retry. */
+            usleep(1000);  /* 1ms */
+        } else {
             printf("splice pipe->udp: %zd expected 40 (remaining %zu)\n", s, remaining);
             return -1;
         }
-        remaining -= 40;
     }
     return 0;
 }
@@ -321,6 +326,10 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
     {
         int opt = 1;
         setsockopt(sk_send, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        /* Non-blocking: splice() to socket must not block forever if the
+         * IPsec transform is still processing previous datagrams. */
+        int flags = fcntl(sk_send, F_GETFL, 0);
+        fcntl(sk_send, F_SETFL, flags | O_NONBLOCK);
         struct sockaddr_in src = {
             .sin_family = AF_INET,
             .sin_port   = htons((uint16_t)g_sender_port),
@@ -433,7 +442,7 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
         }
 
         if (batch_start % (BATCH * 4) == 0)
-            printf("%zu ...\n", batch_start * 16);
+            printf("  %zu/%zu bytes ...\n", batch_start * 16, len);
 
 batch_done:
         if (rc) break;
