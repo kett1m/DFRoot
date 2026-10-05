@@ -341,14 +341,21 @@ static int patch_helper(void) {
         uint8_t verify[16];
         int vfd = open(kCrashDump, O_RDONLY);
         if (vfd >= 0) {
-            ssize_t n = pread(vfd, verify, 16, 16);
+            int all_ok = 1;
+            for (size_t off = 0; off < len; off += 16) {
+                ssize_t n = pread(vfd, verify, 16, (off_t)off);
+                if (n != 16 || memcmp(verify, buf + off, 16) != 0) {
+                    printf("patch_helper verify FAILED at offset 0x%zx\n", off);
+                    all_ok = 0;
+                    break;
+                }
+            }
             close(vfd);
-            if (n == 16 && memcmp(verify, buf + 16, 16) != 0) {
-                printf("patch_helper verify FAILED: page cache not modified\n");
+            if (!all_ok) {
                 free(buf);
                 return -1;
             }
-            printf("patch_helper verify OK\n");
+            printf("patch_helper verify OK (%zu blocks)\n", len / 16);
         }
     }
     free(buf);
