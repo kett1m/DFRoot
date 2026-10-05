@@ -8,6 +8,8 @@
 
     <queries>
         <package android:name="me.weishu.kernelsu" />
+        <package android:name="com.kowx712.supermanager" />
+        <package android:name="com.rifsxd.ksunext" />
     </queries>
 
     <application

@@ -6,9 +6,11 @@
 ## Announcements
 
 DFRoot v3.0 is a major rewrite compared to previous versions 
-It is now **modular**! Meaning it will utilize whichever KernelSU Manager, or other SU manager variant (coming soon, HELP NEEDED), you have installed. 
+It is now **modular**! Meaning it will utilize whichever KernelSU Manager you have installed.
 If you have a custom KernelSU fork to work with specific manufacturers please make a pull request to add it here: 
   - Samsung: https://github.com/diabl0w/KernelSU/releases/latest
+  - KernelSU-Next: https://github.com/KernelSU-Next/KernelSU-Next/releases/latest
+  - KowSU: https://github.com/KOWX712/KernelSU/releases/latest
   - Others: can try official https://github.com/tiann/KernelSU/releases/latest
 
 
@@ -79,4 +81,3 @@ make
 - Original PoC and various code: https://github.com/lsposed/lspromise
 - Selinux Permissive kernel modules and various code: https://github.com/polygraphene/DFReroot
 - Unprivileged XFRM socket method: https://github.com/combeng6th/DirtyInit
-
