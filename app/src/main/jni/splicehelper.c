@@ -14,18 +14,33 @@
 #define PIPE_FD 1
 
 __attribute__((naked)) static long mysyscall1(unsigned long arg0, unsigned long nr) {
-    asm volatile("mov x8, x1\nsvc 0\nret\n":::"x8");
+    asm volatile("mov x8, x1\nsvc 0\nret\n"
+                 ::: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+                     "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                     "x16", "x17", "x18", "x19", "x20", "x21", "x22",
+                     "x23", "x24", "x25", "x26", "x27", "x28", "x29",
+                     "x30", "memory");
 }
 
 __attribute__((naked)) static long mysyscall3(
     unsigned long a0, unsigned long a1, unsigned long a2, unsigned long nr) {
-    asm volatile("mov x8, x3\nsvc 0\nret\n":::"x8");
+    asm volatile("mov x8, x3\nsvc 0\nret\n"
+                 ::: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+                     "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                     "x16", "x17", "x18", "x19", "x20", "x21", "x22",
+                     "x23", "x24", "x25", "x26", "x27", "x28", "x29",
+                     "x30", "memory");
 }
 
 __attribute__((naked)) static long mysyscall6(
     unsigned long a0, unsigned long a1, unsigned long a2,
     unsigned long a3, unsigned long a4, unsigned long a5, unsigned long nr) {
-    asm volatile("mov x8, x6\nsvc 0\nret\n":::"x8");
+    asm volatile("mov x8, x6\nsvc 0\nret\n"
+                 ::: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+                     "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                     "x16", "x17", "x18", "x19", "x20", "x21", "x22",
+                     "x23", "x24", "x25", "x26", "x27", "x28", "x29",
+                     "x30", "memory");
 }
 
 static unsigned long parse_int(char *s) {
