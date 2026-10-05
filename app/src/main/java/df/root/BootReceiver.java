@@ -18,9 +18,18 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (new File("/dev/df").exists()) {
-            Log.i(TAG, "boot: already hooked, skipping");
-            return;
+        File df = new File("/dev/df");
+        if (df.exists()) {
+            File success = new File("/dev/dfm4");
+            if (success.exists()) {
+                Log.i(TAG, "boot: already hooked, skipping");
+                return;
+            }
+            /* Stale mutex from a previous failed attempt — clean up */
+            Log.i(TAG, "boot: stale mutex detected, cleaning up");
+            df.delete();
+            for (int i = 0; i <= 6; i++)
+                new File("/dev/dfm" + i).delete();
         }
         Log.i(TAG, "boot: " + intent.getAction());
         final Context deCtx = context.createDeviceProtectedStorageContext();
