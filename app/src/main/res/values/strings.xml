@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="settings_title">Settings</string>
+    <string name="root_cleaner_title">Root Cleaner</string>
+    <string name="root_cleaner_summary">Manage DFRoot app cache and local data in Android Settings</string>
+    <string name="root_cleaner_message">Open Storage (or Storage &amp; cache) on the next screen to clear DFRoot’s cache. Clear storage deletes the app’s local data and preferences. This does not remove root, kernel modules, or files belonging to other apps.</string>
+    <string name="root_cleaner_open_settings">Open app settings</string>
+    <string name="root_cleaner_unavailable">Unable to open app settings. Open Android Settings, select Apps, then DFRoot to manage storage.</string>
 </resources>

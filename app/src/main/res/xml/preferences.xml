@@ -12,4 +12,10 @@
         app:summary="Applies to both Manual Start and Start at Boot.\nNOTE: this will only work if your SU manager supports it as a late-load arg"
         app:defaultValue="false" />
 
+    <Preference
+        app:key="root_cleaner"
+        app:title="@string/root_cleaner_title"
+        app:summary="@string/root_cleaner_summary"
+        app:persistent="false" />
+
 </PreferenceScreen>
