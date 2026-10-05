@@ -82,20 +82,34 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install Android NDK
         shell: bash
         run: |
           set -euo pipefail
           ndk_version="27.0.12077973"
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+
+          if [ -z "${sdk_root}" ]; then
+            echo "::error::Android SDK path is not configured on the runner."
+            exit 1
+          fi
+
+          sdkmanager_bin="${sdk_root}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "${sdkmanager_bin}" ]; then
+            sdkmanager_bin="$(command -v sdkmanager || true)"
+          fi
+
+          if [ -z "${sdkmanager_bin}" ]; then
+            echo "::error::sdkmanager is not available on the runner."
+            exit 1
+          fi
 
           for attempt in 1 2 3; do
-            if sdkmanager --install "ndk;${ndk_version}"; then
+            if "${sdkmanager_bin}" --install "ndk;${ndk_version}"; then
               exit 0
             fi
 
-            rm -rf "${ANDROID_SDK_ROOT}/ndk/${ndk_version}"
+            rm -rf "${sdk_root}/ndk/${ndk_version}"
             sleep $((attempt * 10))
           done
 
