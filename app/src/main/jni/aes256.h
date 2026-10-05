@@ -107,10 +107,8 @@ static inline void _inv_mix_cols(uint8_t s[16]) {
     }
 }
 
-/* AES-256 ECB single-block decrypt: ct[16] → pt[16] */
-static void aes256_ecb_decrypt(const uint8_t key[32], const uint8_t ct[16], uint8_t pt[16]) {
-    uint32_t rk[60];
-    _aes256_expand(key, rk);
+/* AES-256 ECB single-block decrypt using pre-expanded round keys: ct[16] → pt[16] */
+static void aes256_ecb_decrypt_rk(const uint32_t rk[60], const uint8_t ct[16], uint8_t pt[16]) {
     uint8_t s[16];
     for (int i = 0; i < 16; i++) s[i] = ct[i];
 
@@ -128,4 +126,11 @@ static void aes256_ecb_decrypt(const uint8_t key[32], const uint8_t ct[16], uint
     _add_rk(s, &rk[0]);    /* AddRoundKey round 0 */
 
     for (int i = 0; i < 16; i++) pt[i] = s[i];
+}
+
+/* Legacy: expands key on every call (use aes256_ecb_decrypt_rk for performance) */
+static void aes256_ecb_decrypt(const uint8_t key[32], const uint8_t ct[16], uint8_t pt[16]) {
+    uint32_t rk[60];
+    _aes256_expand(key, rk);
+    aes256_ecb_decrypt_rk(rk, ct, pt);
 }

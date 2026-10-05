@@ -24,6 +24,7 @@ static int      g_encap_port;
 static int      g_sender_port;
 static uint32_t g_spi;
 static uint8_t  g_aes_key[32];
+static uint32_t g_rk[60];
 static uint32_t g_seq = 1;
 struct PatchRestore {
     const char *lib;
@@ -45,7 +46,7 @@ static struct PatchRestore g_libcxx_r;
  */
 static void compute_iv(const uint8_t old_content[16], const uint8_t desired[16], uint8_t iv[16]) {
     uint8_t dec[16];
-    aes256_ecb_decrypt(g_aes_key, old_content, dec);
+    aes256_ecb_decrypt_rk(g_rk, old_content, dec);
     for (int i = 0; i < 16; i++)
         iv[i] = dec[i] ^ desired[i];
 }
@@ -519,6 +520,7 @@ static int setup(int argc, char **argv) {
     g_spi         = spi;
     g_seq         = 1;
     memcpy(g_aes_key, aes_key, 32);
+    _aes256_expand(g_aes_key, g_rk);
 
     const char *ko_target = detect_ko_target();
     libcxx_ko_target = libcxx_data + libcxx_ko_target_off;
